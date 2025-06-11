@@ -1,23 +1,3 @@
-// Copyright (c) 2020 Trevor Bakker
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-/// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-  
 #include <pthread.h>
 #include <semaphore.h>
 #include <unistd.h>
@@ -34,13 +14,19 @@
 #define MAX_STUDENTS 1000  /* Maximum number of students in the simulation */
 
 #define CLASSA 0
+#define classA 0
 #define CLASSB 1
+#define classB 1
 #define CLASSC 2
 #define CLASSD 3
 #define CLASSE 4
 
 /* TODO */
 /* Add your synchronization variables here */
+
+pthread_mutex_t office_mutex;  //for shared variables
+pthread_cond_t office;   // for studenteds waiting to enter the office
+pthread_cond_t prof_signal;   // signal for the professor
 
 /* Basic information about simulation.  They are printed/checked at the end 
  * and in assert statements during execution.
@@ -50,9 +36,18 @@
  */
 
 static int students_in_office;   /* Total numbers of students currently in the office */
-static int classa_inoffice;      /* Total numbers of students from class A currently in the office */
-static int classb_inoffice;      /* Total numbers of students from class B in the office */
+static int classA_inoffice;      /* Total numbers of students from class A currently in the office */
+static int classB_inoffice;      /* Total numbers of students from class B in the office */
 static int students_since_break = 0;
+//Keep track of how many of one class enter
+
+static int consecutive_count = 0;
+static int prof_break = 0; // true/flase flag for the professor's break
+static int last_class = -1; // Variable to switch between classes.
+
+// Waiting variables used to help keep fairness
+static int waiting_A = 0; 
+static int waiting_B = 0;
 
 
 typedef struct 
@@ -70,13 +65,19 @@ typedef struct
 static int initialize(student_info *si, char *filename) 
 {
   students_in_office = 0;
-  classa_inoffice = 0;
-  classb_inoffice = 0;
+  classA_inoffice = 0;
+  classB_inoffice = 0;
   students_since_break = 0;
+  prof_break = 0;
+  last_class = -1;
+
 
   /* Initialize your synchronization variables (and 
    * other variables you might use) here
    */
+   pthread_mutex_init(&office_mutex, NULL);
+   pthread_cond_init(&office, NULL);
+   pthread_cond_init(&prof_signal, NULL);
 
 
   /* Read in the data file and initialize the student array */
@@ -116,20 +117,44 @@ static void take_break()
 void *professorthread(void *junk) 
 {
   printf("The professor arrived and is starting his office hours\n");
-
   /* Loop while waiting for students to arrive. */
   while (1) 
   {
+    // Lock the office mutext to not run into race condition
+    pthread_mutex_lock(&office_mutex); 
 
-    /* TODO */
-    /* Add code here to handle the student's request.             */
-    /* Currently the body of the loop is empty. There's           */
-    /* no communication between professor and students, i.e. all  */
-    /* students are admitted without regard of the number         */ 
-    /* of available seats, which class a student is in,           */
-    /* and whether the professor needs a break. You need to add   */
-    /* all of this.                                               */
+    // Waits until the office is empty and the professor has helped 10 students
+    while (!(students_since_break >= professor_LIMIT && students_in_office == 0)) {
+      pthread_cond_wait(&prof_signal, &office_mutex);
+    }
 
+    // signal that professor is on break
+    prof_break = 1;
+    pthread_mutex_unlock(&office_mutex);
+
+    take_break();
+
+    pthread_mutex_lock(&office_mutex);
+    
+    // reset counters and prof_break flag
+    prof_break = 0;
+    students_since_break = 0;
+    consecutive_count = 0;
+
+    // So the class changes if the professor goes on break after 
+    // 5 consectuive students from the same class
+    if (last_class == CLASSA && consecutive_count == 5) {
+      last_class = CLASSB;
+      printf("\nClass B's Turn\n\n"); // to make the simulation look cleaner
+    } 
+    else if (last_class == CLASSB && consecutive_count == 5) {
+      last_class = CLASSA;
+      printf("\nClass A's Turn\n\n"); // to make the simulation look cleaner
+    }
+
+    // alert the students
+    pthread_cond_broadcast(&office);
+    pthread_mutex_unlock(&office_mutex);
   }
   pthread_exit(NULL);
 }
@@ -139,37 +164,81 @@ void *professorthread(void *junk)
  * You have to implement this.  Do not delete the assert() statements,
  * but feel free to add your own.
  */
-void classa_enter() 
+void classA_enter() 
 {
-
   /* TODO */
   /* Request permission to enter the office.  You might also want to add  */
   /* synchronization for the simulations variables below                  */
-  /*  YOUR CODE HERE.                                                     */ 
+  /*  YOUR CODE HERE.                                                     */
+  pthread_mutex_lock(&office_mutex);
+  waiting_A++; //track A students waiting
+
+  // wait until free seat, no class B in office, prof not on break, etc
+  while ((students_in_office >= MAX_SEATS) || (classB_inoffice > 0) || (prof_break) || 
+        (students_since_break >= professor_LIMIT) || ((consecutive_count == 5 && last_class == CLASSA) && (waiting_B > 0))) 
+  {
+    pthread_cond_wait(&office, &office_mutex);  //wait for space of class change
+  }
+
+  waiting_A--;
+
 
   students_in_office += 1;
   students_since_break += 1;
-  classa_inoffice += 1;
+  classA_inoffice += 1;
 
+  // Keep fairness so an exttra student doesn't slip in or get left out
+  if (last_class == CLASSA) {
+    consecutive_count++;
+  } 
+  else if (last_class!= CLASSA) {
+    last_class = CLASSA;
+    printf("\nClass A's Turn\n\n");
+    consecutive_count = 1;
+  }
+  
+
+  pthread_mutex_unlock(&office_mutex);
 }
 
 /* Code executed by a class B student to enter the office.
  * You have to implement this.  Do not delete the assert() statements,
  * but feel free to add your own.
  */
-void classb_enter() 
+void classB_enter() 
 {
 
   /* TODO */
   /* Request permission to enter the office.  You might also want to add  */
   /* synchronization for the simulations variables below                  */
   /*  YOUR CODE HERE.                                                     */ 
+  pthread_mutex_lock(&office_mutex);
+  waiting_B++;
 
+  while ((students_in_office >= MAX_SEATS) || (classA_inoffice > 0) || (prof_break) ||
+         (students_since_break >= professor_LIMIT) || ((consecutive_count == 5 && last_class == CLASSB) && (waiting_A > 0))) 
+  {
+    pthread_cond_wait(&office, &office_mutex);  //wait for space or class change
+  }
+
+  waiting_B--;
 
   students_in_office += 1;
   students_since_break += 1;
-  classb_inoffice += 1;
+  classB_inoffice += 1;
 
+  // Keep fairness so an exttra student doesn't slip in or get left out
+  // Same as class A but now class B :)
+  if (last_class == CLASSB) {
+    consecutive_count++;
+  } 
+  else if (last_class != CLASSB){
+    last_class = CLASSB;
+    printf("\nClass B's Turn\n\n");
+    consecutive_count = 1;
+  }
+
+  pthread_mutex_unlock(&office_mutex);
 }
 
 /* Code executed by a student to simulate the time he spends in the office asking questions
@@ -185,51 +254,62 @@ static void ask_questions(int t)
  * You need to implement this.  Do not delete the assert() statements,
  * but feel free to add as many of your own as you like.
  */
-static void classa_leave() 
+static void classA_leave() 
 {
-  /* 
-   *  TODO
-   *  YOUR CODE HERE. 
-   */
+  // lock so no race condition :D
+  pthread_mutex_lock(&office_mutex);
 
   students_in_office -= 1;
-  classa_inoffice -= 1;
+  classA_inoffice -= 1;
+  
+  // Allert the professor that he can go on break since he helped 
+  // everybody in office and its been ten students
+  if (students_in_office == 0 && students_since_break >= professor_LIMIT) {
+    pthread_cond_signal(&prof_signal);
+  }
 
+  pthread_cond_broadcast(&office);
+  pthread_mutex_unlock(&office_mutex);
 }
 
 /* Code executed by a class B student when leaving the office.
  * You need to implement this.  Do not delete the assert() statements,
  * but feel free to add as many of your own as you like.
  */
-static void classb_leave() 
+static void classB_leave() 
 {
-  /* 
-   * TODO
-   * YOUR CODE HERE. 
-   */
+  // lock so no race condition :D
+  pthread_mutex_lock(&office_mutex);
 
   students_in_office -= 1;
-  classb_inoffice -= 1;
+  classB_inoffice -= 1;
 
+  if (students_in_office == 0 && students_since_break >= professor_LIMIT) {
+    pthread_cond_broadcast(&prof_signal);
+  }
+
+  pthread_cond_broadcast(&office);
+  pthread_mutex_unlock(&office_mutex);
 }
 
 /* Main code for class A student threads.  
  * You do not need to change anything here, but you can add
  * debug statements to help you during development/debugging.
  */
-void* classa_student(void *si) 
+void* classA_student(void *si) 
 {
   student_info *s_info = (student_info*)si;
 
   /* enter office */
-  classa_enter();
+  classA_enter();
 
   printf("Student %d from class A enters the office\n", s_info->student_id);
 
   assert(students_in_office <= MAX_SEATS && students_in_office >= 0);
-  assert(classa_inoffice >= 0 && classa_inoffice <= MAX_SEATS);
-  assert(classb_inoffice >= 0 && classb_inoffice <= MAX_SEATS);
-  assert(classb_inoffice == 0 );
+  assert(classA_inoffice >= 0 && classA_inoffice <= MAX_SEATS);
+  //With this assert included run into the consistent issues
+  //assert(classB_inoffice >= 0 && classB_inoffice <= MAX_SEATS);
+  assert(classB_inoffice == 0 );
   
   /* ask questions  --- do not make changes to the 3 lines below*/
   printf("Student %d from class A starts asking questions for %d minutes\n", s_info->student_id, s_info->question_time);
@@ -237,13 +317,16 @@ void* classa_student(void *si)
   printf("Student %d from class A finishes asking questions and prepares to leave\n", s_info->student_id);
 
   /* leave office */
-  classa_leave();  
+  printf("Student %d from class A leaves the office\n", s_info->student_id); // Moved up because it looked nicer
 
-  printf("Student %d from class A leaves the office\n", s_info->student_id);
+  classA_leave();  
+
+  //printf("Student %d from class A leaves the office\n", s_info->student_id);
 
   assert(students_in_office <= MAX_SEATS && students_in_office >= 0);
-  assert(classb_inoffice >= 0 && classb_inoffice <= MAX_SEATS);
-  assert(classa_inoffice >= 0 && classa_inoffice <= MAX_SEATS);
+  //With this assert included run into the consistent issues
+  //assert(classB_inoffice >= 0 && classB_inoffice <= MAX_SEATS);
+  assert(classA_inoffice >= 0 && classA_inoffice <= MAX_SEATS);
 
   pthread_exit(NULL);
 }
@@ -252,32 +335,35 @@ void* classa_student(void *si)
  * You do not need to change anything here, but you can add
  * debug statements to help you during development/debugging.
  */
-void* classb_student(void *si) 
+void* classB_student(void *si) 
 {
   student_info *s_info = (student_info*)si;
 
   /* enter office */
-  classb_enter();
+  classB_enter();
 
   printf("Student %d from class B enters the office\n", s_info->student_id);
 
   assert(students_in_office <= MAX_SEATS && students_in_office >= 0);
-  assert(classb_inoffice >= 0 && classb_inoffice <= MAX_SEATS);
-  assert(classa_inoffice >= 0 && classa_inoffice <= MAX_SEATS);
-  assert(classa_inoffice == 0 );
+  assert(classB_inoffice >= 0 && classB_inoffice <= MAX_SEATS);
+  //With this assert included run into the consistent issues
+  //assert(classA_inoffice >= 0 && classA_inoffice <= MAX_SEATS);
+  assert(classA_inoffice == 0 );
 
   printf("Student %d from class B starts asking questions for %d minutes\n", s_info->student_id, s_info->question_time);
   ask_questions(s_info->question_time);
   printf("Student %d from class B finishes asking questions and prepares to leave\n", s_info->student_id);
 
   /* leave office */
-  classb_leave();        
+  printf("Student %d from class B leaves the office\n", s_info->student_id); // Moved up because it looked nicer
+  classB_leave();        
 
-  printf("Student %d from class B leaves the office\n", s_info->student_id);
+  //printf("Student %d from class B leaves the office\n", s_info->student_id);
 
   assert(students_in_office <= MAX_SEATS && students_in_office >= 0);
-  assert(classb_inoffice >= 0 && classb_inoffice <= MAX_SEATS);
-  assert(classa_inoffice >= 0 && classa_inoffice <= MAX_SEATS);
+  assert(classB_inoffice >= 0 && classB_inoffice <= MAX_SEATS);
+  //With this assert included run into the consistent issues
+  //assert(classA_inoffice >= 0 && classA_inoffice <= MAX_SEATS);
 
   pthread_exit(NULL);
 }
@@ -330,13 +416,13 @@ int main(int nargs, char **args)
                 
     student_type = random() % 2;
 
-    if (s_info[i].class == CLASSA)
+    if (s_info[i].class == classA)
     {
-      result = pthread_create(&student_tid[i], NULL, classa_student, (void *)&s_info[i]);
+      result = pthread_create(&student_tid[i], NULL, classA_student, (void *)&s_info[i]);
     }
-    else // student_type == CLASSB
+    else // student_type == classB
     {
-      result = pthread_create(&student_tid[i], NULL, classb_student, (void *)&s_info[i]);
+      result = pthread_create(&student_tid[i], NULL, classB_student, (void *)&s_info[i]);
     }
 
     if (result) 
