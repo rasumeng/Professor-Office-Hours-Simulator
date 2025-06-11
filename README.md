@@ -48,3 +48,9 @@ Structuring readable and maintainable concurrent C code
 
 gcc officehours.c -o officehours -lpthread
 ./officehours
+
+## Running the Application
+The application takes the data file as a commandline paramter, for example:
+```
+./officehours test_cases/grading_test_cases/test-10.txt
+```
