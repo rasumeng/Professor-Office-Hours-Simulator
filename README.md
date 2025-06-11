@@ -1,4 +1,6 @@
 # Professor-Office-Hours-Simulator
+A concurrency practice project inspired by real-world academic chaos.
+
 # Overview
 This project simulates a professor’s shared office hours and explores challenges in parallel programming using threads and synchronization in C. I built it as a fun and practical way to improve my understanding of race conditions, fairness policies, and deadlock avoidance.
 
